@@ -1,0 +1,26 @@
+# حط هذا الملف في المستودع داخل:  .github/workflows/bot.yml
+name: run-bot
+
+on:
+  workflow_dispatch:          # تشغيل يدوي من تبويب Actions
+  schedule:
+    - cron: "0 */6 * * *"     # يعيد التشغيل كل 6 ساعات (حد GitHub للمهمة الواحدة)
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: true    # يوقف النسخة القديمة لما تبدأ الجديدة
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Start bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: timeout 21300 python bot.py || true
