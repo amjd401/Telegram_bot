@@ -16,7 +16,7 @@
    "unwords": [],
    "warns": {
     "6616807922": {
-     "count": 2,
+     "count": 3,
      "restricted": false
     },
     "1237471462": {
@@ -48,7 +48,47 @@
    },
    "names": {
     "6616807922": "Ahmad"
+   },
+   "stats": {
+    "5095978872": {
+     "msgs": 8,
+     "last_msg": 1793566260
+    },
+    "6616807922": {
+     "msgs": 14,
+     "last_msg": 1793566250,
+     "joined": 1793566140
+    }
    }
+  }
+ },
+ "users": {
+  "5095978872": {
+   "name": "امجد",
+   "username": "amjd_134",
+   "first_seen": 1793566011,
+   "name_changed": null,
+   "user_changed": null,
+   "old_names": [],
+   "old_usernames": []
+  },
+  "1237471462": {
+   "name": "🙎🏻‍♂️",
+   "username": "m360e",
+   "first_seen": 1793566024,
+   "name_changed": null,
+   "user_changed": null,
+   "old_names": [],
+   "old_usernames": []
+  },
+  "6616807922": {
+   "name": "Ahmad",
+   "username": "gduivgi",
+   "first_seen": 1793566121,
+   "name_changed": null,
+   "user_changed": null,
+   "old_names": [],
+   "old_usernames": []
   }
  }
 }
