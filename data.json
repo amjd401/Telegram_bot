@@ -8,11 +8,13 @@
      "reply": "وعليكم السلام"
     }
    },
-   "words": [],
+   "words": [
+    "اه"
+   ],
    "unwords": [],
    "warns": {
     "6616807922": {
-     "count": 1,
+     "count": 2,
      "restricted": false
     }
    },
