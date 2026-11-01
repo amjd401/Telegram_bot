@@ -1,0 +1,21 @@
+{
+ "chats": {
+  "-5070320962": {
+   "ranks": {},
+   "replies": {
+    "السلام عليكم": {
+     "word": "السلام عليكم",
+     "reply": "وعليكم السلام"
+    }
+   },
+   "words": [],
+   "unwords": [],
+   "warns": {},
+   "locks": {
+    "links": true,
+    "forward": true,
+    "captcha": true
+   }
+  }
+ }
+}
