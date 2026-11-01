@@ -1,0 +1,483 @@
+"""
+‎بوت حماية قروبات تلقرام — النسخة المتقدمة
+==========================================
+‎- فلتر كلمات بذيئة ذكي (يكشف التشكيل، التطويل، تكرار الحروف، الفواصل بين الحروف، الأرقام بدل الحروف)
+‎- فحص الصور/الملصقات/الفيديو/GIF بالذكاء الاصطناعي وحذف الإباحي (NudeNet)
+‎- حذف الروابط، التوجيه، رسائل البوتات الوسيطة (via @bot)
+‎- فحص الرسائل المعدّلة (ما ينفع أحد يكتب عادي ثم يعدّلها)
+‎- تحقق للأعضاء الجدد (كابتشا) — اللي ما يضغط خلال دقيقتين ينطرد
+‎- طرد اللي اسمه فيه كلام وصخ أو روابط
+‎- عقوبات تصاعدية: تحذير ← كتم ساعة ← كتم يوم ← حظر
+‎- كشف التكرار (Flood)
+‎- أوامر المشرفين: /ban /mute /unmute /warns /addword /delword
+"""
+
+import asyncio
+import os
+import re
+import time
+import logging
+import tempfile
+import unicodedata
+from collections import defaultdict, deque
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from telegram import (
+    Update,
+    ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.constants import MessageEntityType, ParseMode
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("guard")
+
+TOKEN = os.environ["BOT_TOKEN"]
+BASE = Path(__file__).parent
+
+‎# ======================= الإعدادات =======================
+FLOOD_LIMIT = 5              # رسائل
+FLOOD_WINDOW = 10            # خلال كم ثانية
+CAPTCHA_SECONDS = 120        # مهلة التحقق للعضو الجديد
+NSFW_THRESHOLD = 0.45        # حساسية فحص الصور (أقل = أشد)
+STRIKE_WINDOW = 24 * 3600    # المخالفات تنحسب خلال 24 ساعة
+‎# العقوبة حسب رقم المخالفة: None = تحذير فقط، رقم = دقائق كتم، "ban" = حظر
+PUNISHMENTS = {1: None, 2: 60, 3: 24 * 60, 4: "ban"}
+BLOCK_LINKS = True
+BLOCK_FORWARDS = True
+WORDS_FILE = BASE / "words.txt"
+DEVELOPER_URL = "https://t.me/amjd_134"
+DEV_BUTTON = InlineKeyboardMarkup([[InlineKeyboardButton("👨‍💻 المطور", url=DEVELOPER_URL)]])
+
+LINK_RE = re.compile(
+    r"(https?://|www\.|t\.me/|telegram\.(me|dog)/|\b[\w-]+\.(com|net|org|me|io|xyz|link|ly|site|online|top)\b)",
+    re.IGNORECASE,
+)
+
+‎# ======================= تطبيع النص =======================
+_DIACRITICS = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]")
+_INVISIBLE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+_LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "@": "a", "$": "s", "!": "i"})
+_PREFIXES = ("وال", "بال", "فال", "لل", "ال", "يا", "و", "ف", "ب")
+
+
+def normalize(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text).lower()
+    text = _INVISIBLE.sub("", text)
+    text = _DIACRITICS.sub("", text)
+    text = re.sub("[إأآٱ]", "ا", text)
+    text = text.replace("ة", "ه").replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي")
+    text = text.translate(_LEET)
+    text = re.sub(r"([\u0600-\u06FF])\1+", r"\1", text)   # كسسسس ← كس
+    text = re.sub(r"([a-z])\1{2,}", r"\1\1", text)         # fuuuuck ← fuuck
+‎    # دمج الحروف المفصولة: ك.س / ك س / f-u-c-k
+    text = re.sub(r"(?<=\b\w)[\s.\-_*/\\|,]+(?=\w\b)", "", text)
+    return text
+
+
+def load_words() -> set[str]:
+    words = set()
+    if WORDS_FILE.exists():
+        for line in WORDS_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                words.add(normalize(line))
+    return words
+
+
+BAD_WORDS = load_words()
+
+
+def _collapse(s: str) -> str:
+    return re.sub(r"([a-z])\1+", r"\1", s)
+
+
+def find_bad_word(text: str | None) -> str | None:
+    if not text:
+        return None
+    norm = normalize(text)
+    tokens = re.findall(r"\w+", norm)
+    collapsed_bad = {_collapse(w): w for w in BAD_WORDS if len(_collapse(w)) >= 3}
+    for t in tokens:
+        candidates = {t}
+        for p in _PREFIXES:
+            if t.startswith(p) and len(t) - len(p) >= 2:
+                candidates.add(t[len(p):])
+        for c in candidates:
+            if c in BAD_WORDS:
+                return c
+            if _collapse(c) in collapsed_bad:  # fuuuuck / shiiit
+                return collapsed_bad[_collapse(c)]
+‎            # الكلمات الطويلة (4 أحرف فأكثر) نكشفها حتى لو داخل كلمة ثانية
+            for w in BAD_WORDS:
+                if len(w) >= 4 and w in c:
+                    return w
+    return None
+
+
+‎# ======================= فحص الصور (اختياري) =======================
+try:
+    from nudenet import NudeDetector
+    _detector = NudeDetector()
+    log.info("NudeNet loaded ✅")
+except Exception as e:  # لو المكتبة مو مثبتة، البوت يشتغل بدون فحص صور
+    _detector = None
+    log.warning("NudeNet not available, image scanning disabled: %s", e)
+
+NSFW_CLASSES = {
+    "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "FEMALE_BREAST_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+    "ANUS_EXPOSED",
+}
+
+
+def _scan_image(path: str) -> bool:
+    try:
+        results = _detector.detect(path)
+    except Exception as e:
+        log.warning("scan failed: %s", e)
+        return False
+    return any(r["class"] in NSFW_CLASSES and r["score"] >= NSFW_THRESHOLD for r in results)
+
+
+def media_file_id(msg) -> str | None:
+‎    """يرجع file_id لصورة قابلة للفحص من أي نوع وسائط."""
+    if msg.photo:
+        return msg.photo[-1].file_id
+    if msg.sticker:
+        s = msg.sticker
+        if not s.is_animated and not s.is_video:
+            return s.file_id
+        return s.thumbnail.file_id if s.thumbnail else None
+    for media in (msg.video, msg.animation, msg.video_note):
+        if media and media.thumbnail:
+            return media.thumbnail.file_id
+    if msg.document:
+        if (msg.document.mime_type or "").startswith("image/"):
+            return msg.document.file_id
+        if msg.document.thumbnail:
+            return msg.document.thumbnail.file_id
+    return None
+
+
+async def is_nsfw(msg, context) -> bool:
+    if not _detector:
+        return False
+    file_id = media_file_id(msg)
+    if not file_id:
+        return False
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "img")
+        f = await context.bot.get_file(file_id)
+        await f.download_to_drive(path)
+        return await asyncio.to_thread(_scan_image, path)
+
+
+‎# ======================= أدوات مساعدة =======================
+_admin_cache: dict[int, tuple[float, set[int]]] = {}
+recent_msgs: dict[tuple[int, int], deque] = defaultdict(deque)
+strikes: dict[tuple[int, int], list[float]] = defaultdict(list)
+pending_captcha: dict[tuple[int, int], int] = {}
+
+
+async def get_admins(chat_id, context) -> set[int]:
+    cached = _admin_cache.get(chat_id)
+    if cached and time.time() - cached[0] < 300:
+        return cached[1]
+    admins = await context.bot.get_chat_administrators(chat_id)
+    ids = {a.user.id for a in admins}
+    _admin_cache[chat_id] = (time.time(), ids)
+    return ids
+
+
+async def is_admin(update: Update, context) -> bool:
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if msg and msg.sender_chat and msg.sender_chat.id == chat.id:
+        return True  # مشرف مخفي
+    return bool(user) and user.id in await get_admins(chat.id, context)
+
+
+async def default_perms(chat_id, context) -> ChatPermissions:
+    chat = await context.bot.get_chat(chat_id)
+    return chat.permissions or ChatPermissions.all_permissions()
+
+
+async def mute(context, chat_id, user_id, minutes):
+    until = datetime.now(timezone.utc) + timedelta(minutes=minutes) if minutes else None
+    await context.bot.restrict_chat_member(
+        chat_id, user_id, ChatPermissions.no_permissions(), until_date=until
+    )
+
+
+async def punish(update: Update, context, reason: str):
+    chat, user = update.effective_chat, update.effective_user
+    key = (chat.id, user.id)
+    now = time.time()
+    strikes[key] = [t for t in strikes[key] if now - t < STRIKE_WINDOW] + [now]
+    n = len(strikes[key])
+    action = PUNISHMENTS.get(n, "ban")
+    who = user.mention_html()
+    try:
+        if action is None:
+            text = f"⚠️ {who}: {reason}\nتحذير ({n}/{len(PUNISHMENTS)})"
+        elif action == "ban":
+            await context.bot.ban_chat_member(chat.id, user.id)
+            strikes.pop(key, None)
+            text = f"⛔ تم حظر {who} — تكرار المخالفات ({reason})"
+        else:
+            await mute(context, chat.id, user.id, action)
+            mins = f"{action // 60} ساعة" if action >= 60 else f"{action} دقيقة"
+            text = f"🔇 {who}: {reason}\nكتم {mins} — مخالفة ({n}/{len(PUNISHMENTS)})"
+        notice = await chat.send_message(text, parse_mode=ParseMode.HTML)
+        context.application.create_task(_delete_later(notice, 30))
+    except Exception as e:
+        log.warning("punish failed: %s", e)
+
+
+async def _delete_later(msg, seconds):
+    await asyncio.sleep(seconds)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+‎# ======================= فحص الرسائل =======================
+async def guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat, user = update.effective_message, update.effective_chat, update.effective_user
+    if not msg or not user or await is_admin(update, context):
+        return
+
+    reason = None
+    text = " ".join(filter(None, [msg.text, msg.caption]))
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
+
+    if find_bad_word(text):
+        reason = "كلام بذيء"
+    elif msg.poll and find_bad_word(" ".join([msg.poll.question] + [o.text for o in msg.poll.options])):
+        reason = "كلام بذيء"
+    elif BLOCK_LINKS and (
+        LINK_RE.search(text)
+        or any(e.type in (MessageEntityType.URL, MessageEntityType.TEXT_LINK) for e in entities)
+        or msg.reply_markup is not None
+    ):
+        reason = "الروابط ممنوعة"
+    elif BLOCK_FORWARDS and (msg.forward_origin or msg.via_bot or msg.story):
+        reason = "التوجيه ممنوع"
+    elif await is_nsfw(msg, context):
+        reason = "محتوى إباحي"
+
+    if reason:
+        try:
+            await msg.delete()
+        except Exception as e:
+            log.warning("delete failed: %s", e)
+        await punish(update, context, reason)
+        return
+
+    if update.edited_message:
+        return
+
+‎    # كشف التكرار
+    key, now = (chat.id, user.id), time.time()
+    q = recent_msgs[key]
+    q.append(now)
+    while q and now - q[0] > FLOOD_WINDOW:
+        q.popleft()
+    if len(q) > FLOOD_LIMIT:
+        q.clear()
+        await punish(update, context, "تكرار الرسائل")
+
+
+‎# ======================= الأعضاء الجدد + التحقق =======================
+async def new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, chat = update.effective_message, update.effective_chat
+    adder_is_admin = await is_admin(update, context)
+    try:
+        await msg.delete()  # حذف رسالة "انضم فلان"
+    except Exception:
+        pass
+
+    for m in msg.new_chat_members:
+        if m.id == context.bot.id:
+            await chat.send_message(
+‎                "🛡️ ارفعني مشرف بصلاحيات: حذف الرسائل + حظر الأعضاء + تقييد الأعضاء.",
+                reply_markup=DEV_BUTTON,
+            )
+            continue
+        if m.is_bot:
+            if not adder_is_admin:
+                await context.bot.ban_chat_member(chat.id, m.id)
+            continue
+        if find_bad_word(m.full_name) or LINK_RE.search(m.full_name or ""):
+            await context.bot.ban_chat_member(chat.id, m.id)
+            continue
+        if adder_is_admin:
+            continue
+
+‎        # كابتشا
+        try:
+            await mute(context, chat.id, m.id, None)
+        except Exception as e:
+            log.warning("captcha restrict failed: %s", e)
+            continue
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ أنا مو بوت", callback_data=f"v:{m.id}")]])
+        cap = await chat.send_message(
+            f"أهلاً {m.mention_html()} 👋\nاضغط الزر خلال {CAPTCHA_SECONDS // 60} دقائق عشان تقدر تكتب.",
+            reply_markup=kb,
+            parse_mode=ParseMode.HTML,
+        )
+        pending_captcha[(chat.id, m.id)] = cap.message_id
+        context.application.create_task(captcha_timeout(context, chat.id, m.id, cap))
+
+
+async def captcha_timeout(context, chat_id, user_id, cap_msg):
+    await asyncio.sleep(CAPTCHA_SECONDS)
+    if pending_captcha.pop((chat_id, user_id), None) is None:
+        return
+    try:
+        await context.bot.ban_chat_member(chat_id, user_id)
+        await context.bot.unban_chat_member(chat_id, user_id)  # طرد بدون حظر دائم
+        await cap_msg.delete()
+    except Exception as e:
+        log.warning("captcha kick failed: %s", e)
+
+
+async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    target = int(q.data.split(":")[1])
+    if q.from_user.id != target:
+        await q.answer("هذا الزر مو لك 🙂", show_alert=True)
+        return
+    chat_id = q.message.chat.id
+    pending_captcha.pop((chat_id, target), None)
+    await context.bot.restrict_chat_member(chat_id, target, await default_perms(chat_id, context))
+    await q.answer("تم التحقق ✅")
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+
+
+‎# ======================= أوامر المشرفين =======================
+async def _admin_only(update, context) -> bool:
+    if not await is_admin(update, context):
+        await update.effective_message.reply_text("هذا الأمر للمشرفين بس.")
+        return False
+    return True
+
+
+async def _target(update, context):
+    if not await _admin_only(update, context):
+        return None
+    reply = update.effective_message.reply_to_message
+    if not reply or not reply.from_user:
+        await update.effective_message.reply_text("استخدم الأمر بالرد على رسالة الشخص.")
+        return None
+    return reply.from_user
+
+
+async def cmd_ban(update, context):
+    if t := await _target(update, context):
+        await context.bot.ban_chat_member(update.effective_chat.id, t.id)
+        await update.effective_message.reply_html(f"⛔ تم حظر {t.mention_html()}")
+
+
+async def cmd_mute(update, context):
+    if t := await _target(update, context):
+        minutes = int(context.args[0]) if context.args and context.args[0].isdigit() else None
+        await mute(context, update.effective_chat.id, t.id, minutes)
+        await update.effective_message.reply_html(
+            f"🔇 تم كتم {t.mention_html()} ({f'{minutes} دقيقة' if minutes else 'للأبد'})"
+        )
+
+
+async def cmd_unmute(update, context):
+    if t := await _target(update, context):
+        chat_id = update.effective_chat.id
+        await context.bot.restrict_chat_member(chat_id, t.id, await default_perms(chat_id, context))
+        strikes.pop((chat_id, t.id), None)
+        await update.effective_message.reply_html(f"🔊 تم فك الكتم عن {t.mention_html()}")
+
+
+async def cmd_warns(update, context):
+    if t := await _target(update, context):
+        now = time.time()
+        n = len([x for x in strikes[(update.effective_chat.id, t.id)] if now - x < STRIKE_WINDOW])
+        await update.effective_message.reply_html(f"📋 مخالفات {t.mention_html()}: {n}")
+
+
+async def cmd_addword(update, context):
+    if not await _admin_only(update, context):
+        return
+    try:
+        await update.effective_message.delete()  # لا تخلي الكلمة ظاهرة بالقروب
+    except Exception:
+        pass
+    if not context.args:
+        return
+    word = " ".join(context.args)
+    BAD_WORDS.add(normalize(word))
+    with WORDS_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"\n{word}")
+    await update.effective_chat.send_message("✅ تمت إضافة الكلمة للفلتر")
+
+
+async def cmd_delword(update, context):
+    if not await _admin_only(update, context) or not context.args:
+        return
+    BAD_WORDS.discard(normalize(" ".join(context.args)))
+    await update.effective_message.reply_text("✅ تم حذف الكلمة من الفلتر")
+
+
+async def cmd_start(update, context):
+    await update.effective_message.reply_text(
+‎        "🛡️ بوت حماية\n"
+‎        "ضيفني لقروبك وارفعني مشرف (حذف + حظر + تقييد).\n\n"
+‎        "أوامر المشرفين (بالرد على رسالة):\n"
+        "/ban — حظر\n/mute [دقائق] — كتم\n/unmute — فك كتم\n/warns — عدد المخالفات\n\n"
+        "/addword كلمة — إضافة كلمة ممنوعة\n/delword كلمة — حذفها\n\n"
+‎        "👨‍💻 المطور: @amjd_134",
+        reply_markup=DEV_BUTTON,
+    )
+
+
+async def cmd_dev(update, context):
+    await update.effective_message.reply_text("👨‍💻 مطور البوت: @amjd_134", reply_markup=DEV_BUTTON)
+
+
+‎# ======================= التشغيل =======================
+def main():
+    app = Application.builder().token(TOKEN).build()
+    groups = filters.ChatType.GROUPS
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler(["dev", "developer"], cmd_dev))
+    for name, fn in [
+        ("ban", cmd_ban), ("mute", cmd_mute), ("unmute", cmd_unmute),
+        ("warns", cmd_warns), ("addword", cmd_addword), ("delword", cmd_delword),
+    ]:
+        app.add_handler(CommandHandler(name, fn, filters=groups))
+
+    app.add_handler(CallbackQueryHandler(verify, pattern=r"^v:\d+$"))
+    app.add_handler(MessageHandler(groups & filters.StatusUpdate.NEW_CHAT_MEMBERS, new_members))
+    app.add_handler(MessageHandler(groups & ~filters.COMMAND & ~filters.StatusUpdate.ALL, guard))
+
+    log.info("Bot running with %d filtered words", len(BAD_WORDS))
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
