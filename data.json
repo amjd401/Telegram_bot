@@ -1,7 +1,9 @@
 {
  "chats": {
   "-5070320962": {
-   "ranks": {},
+   "ranks": {
+    "6616807922": "vip"
+   },
    "replies": {
     "السلام عليكم": {
      "word": "السلام عليكم",
@@ -39,6 +41,9 @@
     "welcome": true,
     "replies": true,
     "warns": true
+   },
+   "names": {
+    "6616807922": "Ahmad"
    }
   }
  }
