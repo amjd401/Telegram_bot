@@ -724,33 +724,41 @@ HELP_SECTIONS = {
 }
 
 
-def help_keyboard():
+def help_keyboard(chat_id: int, user_id: int):
+    """الازرار مربوطة بالقروب وبالشخص اللي طلب القائمة."""
+    def b(label, sec):
+        return InlineKeyboardButton(label, callback_data=f"h:{sec}:{chat_id}:{user_id}")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("الحماية", callback_data="h:prot"),
-         InlineKeyboardButton("الرتب", callback_data="h:ranks")],
-        [InlineKeyboardButton("منع الكلمات", callback_data="h:words"),
-         InlineKeyboardButton("الردود", callback_data="h:replies")],
-        [InlineKeyboardButton("الاقفال", callback_data="h:locks"),
-         InlineKeyboardButton("التفعيل", callback_data="h:features")],
-        [InlineKeyboardButton("اوامر الاعضاء", callback_data="h:member")],
+        [b("الحماية", "prot"), b("الرتب", "ranks")],
+        [b("منع الكلمات", "words"), b("الردود", "replies")],
+        [b("الاقفال", "locks"), b("التفعيل", "features")],
+        [b("اوامر الاعضاء", "member")],
         [InlineKeyboardButton("المطور", url=DEVELOPER_URL)],
     ])
 
 
 async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    section = q.data.split(":")[1]
+    _, section, chat_id, owner = q.data.split(":")
+    chat_id, owner = int(chat_id), int(owner)
+    if q.from_user.id != owner:
+        await q.answer("هذي القائمة مو لك", show_alert=True)
+        return
+    rank = await get_rank(chat_id, q.from_user.id, context)
+    if rank < ADMIN:
+        await q.answer("القائمة للمشرفين بس", show_alert=True)
+        return
     if section == "member":
         text = MEMBER_HELP
     else:
         min_rank, text = HELP_SECTIONS[section]
-        rank = await get_rank(q.message.chat.id, q.from_user.id, context)
         if rank < min_rank:
             await q.answer(f"هذا القسم لـ{RANK_NAMES[min_rank]} وفوق", show_alert=True)
             return
     await q.answer()
     try:
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=help_keyboard())
+        await q.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                  reply_markup=help_keyboard(chat_id, owner))
     except Exception:
         pass  # نفس النص
 
@@ -792,10 +800,28 @@ async def _check_above(c: Ctx) -> bool:
 
 # ---------- اوامر الاعضاء ----------
 async def c_help(c: Ctx):
-    if c.rank >= ADMIN:
-        await c.reply(f"اهلا يا {RANK_NAMES[c.rank]}\nاختار القسم:", reply_markup=help_keyboard())
-    else:
-        await c.reply(MEMBER_HELP, reply_markup=DEV_BUTTON)
+    """قائمة الاوامر: تنرسل للمشرف بالخاص عشان الاعضاء ما يشوفونها."""
+    if c.rank < ADMIN:
+        return
+    title = escape(c.chat.title or "القروب")
+    text = f"اوامر قروب <b>{title}</b>\nرتبتك: {RANK_NAMES[c.rank]}\n\nاختار القسم:"
+    kb = help_keyboard(c.chat.id, c.user.id)
+    try:
+        await c.msg.delete()
+    except Exception:
+        pass
+    try:
+        await c.context.bot.send_message(c.user.id, text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        await send_temp(c.chat, f"{mention(c.user)} ارسلت لك الاوامر بالخاص", seconds=10)
+    except Exception:
+        # ما بدأ محادثة مع البوت: نرسلها بالقروب وتنحذف بعد دقيقة
+        me = await c.context.bot.get_me()
+        await send_temp(
+            c.chat,
+            text + f"\n\n(تنحذف بعد دقيقة، ولو تبيها توصلك بالخاص ابدأ محادثة مع @{me.username})",
+            seconds=60,
+            reply_markup=kb,
+        )
 
 
 async def c_time(c: Ctx):
@@ -1745,7 +1771,11 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.COMMAND, on_slash))
     app.add_handler(CallbackQueryHandler(verify, pattern=r"^v:\d+$"))
-    app.add_handler(CallbackQueryHandler(help_callback, pattern=r"^h:\w+$"))
+    app.add_handler(CallbackQueryHandler(help_callback, pattern=r"^h:\w+:-?\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(
+        lambda u, c: u.callback_query.answer("هذي قائمة قديمة، اكتب الاوامر من جديد", show_alert=True),
+        pattern=r"^h:\w+$",
+    ))
     app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, on_migrate))
