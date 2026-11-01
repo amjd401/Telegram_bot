@@ -19,7 +19,7 @@
    "locks": {
     "links": true,
     "forward": true,
-    "captcha": true
+    "captcha": false
    }
   }
  }
