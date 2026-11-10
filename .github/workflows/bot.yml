@@ -1,0 +1,60 @@
+name: Telegram Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7 */3 * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install requirements
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          RUN_SECONDS: "19800"
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@users.noreply.github.com"
+          save() {
+            git add data.json
+            git diff --cached --quiet && return 0
+            git commit -q -m "bot data update [skip ci]"
+            git pull -q --rebase --autostash || git rebase --abort || true
+            git push -q || true
+          }
+          python bot.py &
+          PID=$!
+          n=0
+          while kill -0 "$PID" 2>/dev/null; do
+            sleep 15
+            n=$((n + 1))
+            if [ $((n % 120)) -eq 0 ]; then save; fi
+          done
+          wait "$PID" || true
+          save
+
+      - name: Restart
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bot.yml --ref "${{ github.ref_name }}"
